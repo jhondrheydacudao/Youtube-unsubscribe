@@ -1,0 +1,896 @@
+// ==UserScript==
+// @name         YouTube Bulk Unsubscriber
+// @namespace    https://github.com/youtube-unsubscriber
+// @version      2.0.0
+// @description  Scan, select, and bulk unsubscribe from YouTube channels with a sleek UI panel
+// @author       UserScript
+// @match        https://www.youtube.com/*
+// @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ─── Constants ───────────────────────────────────────────────────────────────
+  const STORAGE_KEY = 'ytus_settings';
+  const DELAY_MIN = 1200;
+  const DELAY_MAX = 2800;
+  const PANEL_ID = 'ytus-panel';
+
+  // ─── State ───────────────────────────────────────────────────────────────────
+  let state = {
+    channels: [],
+    selected: new Set(),
+    running: false,
+    paused: false,
+    progress: { done: 0, total: 0 },
+    log: [],
+    filterText: '',
+    delay: GM_getValue('delay', 1800),
+  };
+
+  // ─── Styles ──────────────────────────────────────────────────────────────────
+  GM_addStyle(`
+    #ytus-fab {
+      position: fixed;
+      bottom: 28px;
+      right: 28px;
+      z-index: 99998;
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      background: #ff0000;
+      color: #fff;
+      border: none;
+      cursor: pointer;
+      font-size: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.28);
+      transition: transform 0.15s, background 0.15s;
+    }
+    #ytus-fab:hover { background: #cc0000; transform: scale(1.08); }
+
+    #ytus-panel {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 99999;
+      width: 560px;
+      max-width: 96vw;
+      max-height: 90vh;
+      background: #0f0f0f;
+      color: #f1f1f1;
+      border-radius: 14px;
+      border: 1px solid #272727;
+      display: flex;
+      flex-direction: column;
+      font-family: 'Roboto', sans-serif;
+      font-size: 14px;
+      overflow: hidden;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.7);
+    }
+
+    .ytus-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid #272727;
+      background: #161616;
+    }
+    .ytus-header-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .ytus-header-title span.pill {
+      font-size: 11px;
+      font-weight: 500;
+      background: #ff0000;
+      color: #fff;
+      border-radius: 20px;
+      padding: 2px 8px;
+    }
+    .ytus-close {
+      background: none;
+      border: none;
+      color: #aaa;
+      font-size: 20px;
+      cursor: pointer;
+      line-height: 1;
+      padding: 4px;
+      border-radius: 6px;
+      transition: color 0.1s, background 0.1s;
+    }
+    .ytus-close:hover { color: #fff; background: #272727; }
+
+    .ytus-tabs {
+      display: flex;
+      border-bottom: 1px solid #272727;
+      background: #161616;
+    }
+    .ytus-tab {
+      flex: 1;
+      padding: 11px 0;
+      text-align: center;
+      cursor: pointer;
+      font-size: 13px;
+      color: #aaa;
+      border: none;
+      background: none;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      font-weight: 500;
+    }
+    .ytus-tab:hover { color: #fff; }
+    .ytus-tab.active { color: #fff; border-bottom-color: #ff0000; }
+
+    .ytus-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0;
+      min-height: 0;
+    }
+    .ytus-body::-webkit-scrollbar { width: 5px; }
+    .ytus-body::-webkit-scrollbar-track { background: transparent; }
+    .ytus-body::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+
+    .ytus-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border-bottom: 1px solid #1e1e1e;
+      background: #111;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .ytus-search {
+      flex: 1;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 8px;
+      color: #f1f1f1;
+      padding: 7px 12px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .ytus-search:focus { border-color: #ff0000; }
+    .ytus-search::placeholder { color: #555; }
+
+    .ytus-btn {
+      padding: 7px 14px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: #f1f1f1;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ytus-btn:hover { background: #272727; border-color: #444; }
+    .ytus-btn.primary {
+      background: #ff0000;
+      border-color: #ff0000;
+      color: #fff;
+    }
+    .ytus-btn.primary:hover { background: #cc0000; border-color: #cc0000; }
+    .ytus-btn.danger {
+      background: transparent;
+      border-color: #ff4444;
+      color: #ff6666;
+    }
+    .ytus-btn.danger:hover { background: #2a0000; }
+    .ytus-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .ytus-channel-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    .ytus-channel-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid #1a1a1a;
+      cursor: pointer;
+      transition: background 0.1s;
+      user-select: none;
+    }
+    .ytus-channel-item:hover { background: #1a1a1a; }
+    .ytus-channel-item.selected { background: #1a0a0a; }
+    .ytus-channel-item.done { opacity: 0.4; }
+
+    .ytus-checkbox {
+      width: 17px;
+      height: 17px;
+      border: 1.5px solid #444;
+      border-radius: 4px;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: border-color 0.1s, background 0.1s;
+    }
+    .ytus-channel-item.selected .ytus-checkbox {
+      border-color: #ff0000;
+      background: #ff0000;
+    }
+    .ytus-checkbox-tick {
+      display: none;
+      font-size: 10px;
+      color: #fff;
+      font-weight: 700;
+    }
+    .ytus-channel-item.selected .ytus-checkbox-tick { display: block; }
+
+    .ytus-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #272727;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .ytus-avatar-placeholder {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #272727;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 600;
+      color: #888;
+      flex-shrink: 0;
+    }
+    .ytus-channel-info { flex: 1; min-width: 0; }
+    .ytus-channel-name {
+      font-size: 13px;
+      font-weight: 500;
+      color: #f1f1f1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ytus-channel-sub {
+      font-size: 11px;
+      color: #717171;
+      margin-top: 1px;
+    }
+    .ytus-status-badge {
+      font-size: 10px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+    .ytus-status-badge.done { background: #1a2a1a; color: #4caf50; }
+    .ytus-status-badge.failed { background: #2a1a1a; color: #f44336; }
+
+    .ytus-empty {
+      text-align: center;
+      padding: 48px 24px;
+      color: #555;
+    }
+    .ytus-empty-icon { font-size: 40px; margin-bottom: 12px; }
+    .ytus-empty-title { font-size: 15px; color: #888; margin-bottom: 6px; font-weight: 500; }
+    .ytus-empty-sub { font-size: 12px; line-height: 1.6; }
+
+    .ytus-footer {
+      padding: 12px 16px;
+      border-top: 1px solid #272727;
+      background: #161616;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .ytus-sel-count { font-size: 12px; color: #888; flex: 1; }
+    .ytus-sel-count strong { color: #f1f1f1; }
+
+    .ytus-progress-bar-wrap {
+      height: 3px;
+      background: #1e1e1e;
+      border-radius: 2px;
+      overflow: hidden;
+      margin: 0 16px 0;
+      flex: 1;
+    }
+    .ytus-progress-bar {
+      height: 100%;
+      background: #ff0000;
+      border-radius: 2px;
+      transition: width 0.3s;
+    }
+    .ytus-progress-label { font-size: 11px; color: #717171; }
+
+    /* Settings tab */
+    .ytus-settings-section {
+      padding: 20px 20px 8px;
+    }
+    .ytus-settings-label {
+      font-size: 12px;
+      color: #888;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
+    }
+    .ytus-settings-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .ytus-settings-row label { flex: 1; font-size: 13px; color: #ccc; }
+    .ytus-range {
+      -webkit-appearance: none;
+      width: 130px;
+      height: 3px;
+      background: #333;
+      border-radius: 2px;
+      outline: none;
+    }
+    .ytus-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #ff0000;
+      cursor: pointer;
+    }
+    .ytus-range-val { font-size: 12px; color: #888; min-width: 44px; text-align: right; }
+    .ytus-info-box {
+      margin: 0 20px 20px;
+      background: #1a1a1a;
+      border: 1px solid #272727;
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 12px;
+      color: #888;
+      line-height: 1.7;
+    }
+    .ytus-info-box a { color: #ff6666; text-decoration: none; }
+
+    /* Log tab */
+    .ytus-log-wrap {
+      padding: 12px 16px;
+      font-size: 12px;
+      font-family: 'Roboto Mono', monospace;
+      color: #888;
+    }
+    .ytus-log-entry { padding: 3px 0; border-bottom: 1px solid #1a1a1a; }
+    .ytus-log-entry.ok { color: #4caf50; }
+    .ytus-log-entry.err { color: #f44336; }
+    .ytus-log-entry.info { color: #888; }
+
+    /* Overlay backdrop */
+    #ytus-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 99997;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(2px);
+    }
+  `);
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+  function addLog(msg, type = 'info') {
+    state.log.unshift({ msg, type, ts: new Date().toLocaleTimeString() });
+    if (state.log.length > 200) state.log.pop();
+    renderLog();
+  }
+
+  // ─── Channel scraping ─────────────────────────────────────────────────────────
+  function scrapeChannels() {
+    const channels = [];
+    const seen = new Set();
+
+    // Subscriptions page items
+    const items = document.querySelectorAll('ytd-channel-renderer, ytd-guide-entry-renderer[is-primary]');
+    items.forEach(el => {
+      try {
+        const nameEl = el.querySelector('#channel-title, #text');
+        const avatarEl = el.querySelector('img#img, yt-img-shadow img');
+        const linkEl = el.querySelector('a#channel-title, a#main-link, a');
+        if (!nameEl) return;
+        const name = nameEl.textContent.trim();
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        const href = linkEl ? linkEl.href : '';
+        const channelId = href.match(/\/(channel|c|@[^/]+)/)?.[0] || name;
+        channels.push({
+          id: channelId + '_' + name,
+          name,
+          avatar: avatarEl ? avatarEl.src : '',
+          url: href,
+          element: el,
+          status: null,
+        });
+      } catch {}
+    });
+
+    // Fallback: sidebar subscriptions guide
+    if (channels.length === 0) {
+      document.querySelectorAll('ytd-guide-entry-renderer').forEach(el => {
+        try {
+          const nameEl = el.querySelector('#title, #guide-entry-title, yt-formatted-string');
+          if (!nameEl) return;
+          const name = nameEl.textContent.trim();
+          if (!name || name.length < 2 || seen.has(name)) return;
+          const linkEl = el.querySelector('a');
+          const href = linkEl ? linkEl.href : '';
+          if (!href.includes('/channel') && !href.includes('/@') && !href.includes('/c/')) return;
+          seen.add(name);
+          const avatarEl = el.querySelector('img');
+          channels.push({
+            id: href + '_' + name,
+            name,
+            avatar: avatarEl ? avatarEl.src : '',
+            url: href,
+            element: el,
+            status: null,
+          });
+        } catch {}
+      });
+    }
+
+    return channels;
+  }
+
+  // ─── Unsubscribe action ───────────────────────────────────────────────────────
+  async function unsubscribeOne(channel) {
+    // Try clicking unsubscribe button directly on the channel element
+    let btn = channel.element.querySelector(
+      'yt-button-shape button, ytd-subscribe-button-renderer button, [aria-label*="Unsubscribe"], [aria-label*="unsubscribe"]'
+    );
+
+    // If label says "Subscribed" or similar — click it to open the menu
+    if (btn && (btn.textContent.includes('Subscribed') || btn.getAttribute('aria-label')?.includes('Subscribed'))) {
+      btn.click();
+      await sleep(600);
+      // Look for the confirm unsubscribe button in dialog/menu
+      const confirmBtn = document.querySelector(
+        'yt-button-renderer.style-destructive button, paper-button.style-destructive, ' +
+        '[aria-label="Unsubscribe"], ytd-menu-service-item-renderer:last-child, ' +
+        'tp-yt-paper-button[dialog-confirm]'
+      );
+      if (confirmBtn) {
+        confirmBtn.click();
+        await sleep(400);
+        return true;
+      }
+    }
+
+    // Navigate to channel and click from there
+    if (channel.url) {
+      const tabUrl = channel.url;
+      // Open in background is not possible in userscript without new tab,
+      // so we use fetch to detect if url is valid and rely on DOM approach
+      addLog(`Navigating to ${channel.name}…`, 'info');
+      window.location.href = tabUrl;
+      await sleep(2500);
+      const subBtn = document.querySelector(
+        '#subscribe-button button, yt-button-shape[subscribe-button-renderer] button'
+      );
+      if (subBtn) {
+        subBtn.click();
+        await sleep(700);
+        const confirm = document.querySelector(
+          'yt-button-renderer.style-destructive button, [aria-label="Unsubscribe"], ' +
+          'ytd-button-renderer[is-paper-button] paper-button:last-child'
+        );
+        if (confirm) { confirm.click(); await sleep(400); return true; }
+      }
+    }
+    return false;
+  }
+
+  // ─── UI rendering ─────────────────────────────────────────────────────────────
+  let currentTab = 'channels';
+  let panel = null;
+
+  function createPanel() {
+    // Backdrop
+    let bd = document.getElementById('ytus-backdrop');
+    if (!bd) {
+      bd = document.createElement('div');
+      bd.id = 'ytus-backdrop';
+      bd.addEventListener('click', closePanel);
+      document.body.appendChild(bd);
+    }
+
+    if (document.getElementById(PANEL_ID)) return document.getElementById(PANEL_ID);
+
+    panel = document.createElement('div');
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="ytus-header">
+        <div class="ytus-header-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff0000" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22.54 6.42A2.78 2.78 0 0020.83 4.7C19.24 4.27 12 4.27 12 4.27s-7.24 0-8.83.43A2.78 2.78 0 001.46 6.42 29 29 0 001 12a29 29 0 00.46 5.58A2.78 2.78 0 003.17 19.3C4.76 19.73 12 19.73 12 19.73s7.24 0 8.83-.43a2.78 2.78 0 001.71-1.72A29 29 0 0023 12a29 29 0 00-.46-5.58z"/>
+            <polygon points="9.75 15.02 15.5 12 9.75 8.98 9.75 15.02"/>
+          </svg>
+          YouTube Unsubscriber
+          <span class="pill" id="ytus-version">v2.0</span>
+        </div>
+        <button class="ytus-close" id="ytus-close-btn" title="Close">✕</button>
+      </div>
+      <div class="ytus-tabs">
+        <button class="ytus-tab active" data-tab="channels">Channels</button>
+        <button class="ytus-tab" data-tab="log">Log</button>
+        <button class="ytus-tab" data-tab="settings">Settings</button>
+      </div>
+      <div class="ytus-body" id="ytus-body"></div>
+      <div class="ytus-footer" id="ytus-footer"></div>
+    `;
+    document.body.appendChild(panel);
+
+    panel.querySelector('#ytus-close-btn').addEventListener('click', closePanel);
+    panel.querySelectorAll('.ytus-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        currentTab = tab.dataset.tab;
+        panel.querySelectorAll('.ytus-tab').forEach(t => t.classList.toggle('active', t === tab));
+        renderBody();
+      });
+    });
+
+    return panel;
+  }
+
+  function renderBody() {
+    const body = document.getElementById('ytus-body');
+    const footer = document.getElementById('ytus-footer');
+    if (!body) return;
+
+    if (currentTab === 'channels') renderChannelsTab(body, footer);
+    else if (currentTab === 'log') renderLogTab(body, footer);
+    else if (currentTab === 'settings') renderSettingsTab(body, footer);
+  }
+
+  function renderChannelsTab(body, footer) {
+    const filtered = state.channels.filter(ch =>
+      ch.name.toLowerCase().includes(state.filterText.toLowerCase())
+    );
+
+    const selFiltered = filtered.filter(ch => state.selected.has(ch.id));
+
+    body.innerHTML = `
+      <div class="ytus-toolbar">
+        <input class="ytus-search" id="ytus-search" placeholder="Search channels…" value="${state.filterText}">
+        <button class="ytus-btn" id="ytus-scan">↻ Scan</button>
+        <button class="ytus-btn" id="ytus-selall">Select all</button>
+        <button class="ytus-btn" id="ytus-selnone">None</button>
+      </div>
+      ${filtered.length === 0 ? `
+        <div class="ytus-empty">
+          <div class="ytus-empty-icon">📭</div>
+          <div class="ytus-empty-title">${state.channels.length === 0 ? 'No channels scanned yet' : 'No channels match'}</div>
+          <div class="ytus-empty-sub">${state.channels.length === 0
+            ? 'Go to <a href="https://www.youtube.com/feed/channels" style="color:#ff6666">youtube.com/feed/channels</a><br>and click <strong>↻ Scan</strong> to load your subscriptions.'
+            : 'Try a different search term.'
+          }</div>
+        </div>
+      ` : `
+        <ul class="ytus-channel-list" id="ytus-list">
+          ${filtered.map(ch => channelItemHTML(ch)).join('')}
+        </ul>
+      `}
+    `;
+
+    // Footer
+    const total = state.selected.size;
+    if (state.running) {
+      const pct = state.progress.total > 0
+        ? Math.round((state.progress.done / state.progress.total) * 100) : 0;
+      footer.innerHTML = `
+        <span class="ytus-progress-label">${state.progress.done}/${state.progress.total}</span>
+        <div class="ytus-progress-bar-wrap">
+          <div class="ytus-progress-bar" style="width:${pct}%"></div>
+        </div>
+        <button class="ytus-btn" id="ytus-pause">${state.paused ? '▶ Resume' : '⏸ Pause'}</button>
+        <button class="ytus-btn danger" id="ytus-stop">■ Stop</button>
+      `;
+      footer.querySelector('#ytus-pause').addEventListener('click', togglePause);
+      footer.querySelector('#ytus-stop').addEventListener('click', stopRun);
+    } else {
+      footer.innerHTML = `
+        <span class="ytus-sel-count"><strong>${total}</strong> channel${total !== 1 ? 's' : ''} selected</span>
+        <button class="ytus-btn" id="ytus-invert">Invert</button>
+        <button class="ytus-btn primary" id="ytus-run" ${total === 0 ? 'disabled' : ''}>
+          Unsubscribe ${total > 0 ? total : ''} →
+        </button>
+      `;
+      footer.querySelector('#ytus-invert')?.addEventListener('click', invertSelection);
+      footer.querySelector('#ytus-run')?.addEventListener('click', runUnsubscribe);
+    }
+
+    // Events
+    body.querySelector('#ytus-search')?.addEventListener('input', e => {
+      state.filterText = e.target.value;
+      renderBody();
+    });
+    body.querySelector('#ytus-scan')?.addEventListener('click', scanChannels);
+    body.querySelector('#ytus-selall')?.addEventListener('click', () => {
+      filtered.forEach(ch => state.selected.add(ch.id));
+      renderBody();
+    });
+    body.querySelector('#ytus-selnone')?.addEventListener('click', () => {
+      filtered.forEach(ch => state.selected.delete(ch.id));
+      renderBody();
+    });
+    body.querySelectorAll('.ytus-channel-item').forEach(item => {
+      item.addEventListener('click', () => {
+        const id = item.dataset.id;
+        if (state.selected.has(id)) state.selected.delete(id);
+        else state.selected.add(id);
+        item.classList.toggle('selected', state.selected.has(id));
+        renderFooterSelCount();
+      });
+    });
+  }
+
+  function channelItemHTML(ch) {
+    const sel = state.selected.has(ch.id);
+    const initial = ch.name.charAt(0).toUpperCase();
+    const avatar = ch.avatar
+      ? `<img class="ytus-avatar" src="${ch.avatar}" alt="">`
+      : `<div class="ytus-avatar-placeholder">${initial}</div>`;
+    const statusBadge = ch.status === 'done'
+      ? '<span class="ytus-status-badge done">✓ Done</span>'
+      : ch.status === 'failed'
+      ? '<span class="ytus-status-badge failed">✗ Failed</span>'
+      : '';
+    return `
+      <li class="ytus-channel-item ${sel ? 'selected' : ''} ${ch.status ? ch.status : ''}"
+          data-id="${ch.id}">
+        <div class="ytus-checkbox"><span class="ytus-checkbox-tick">✓</span></div>
+        ${avatar}
+        <div class="ytus-channel-info">
+          <div class="ytus-channel-name">${escHtml(ch.name)}</div>
+          <div class="ytus-channel-sub">${ch.url ? new URL(ch.url).pathname : ''}</div>
+        </div>
+        ${statusBadge}
+      </li>
+    `;
+  }
+
+  function renderFooterSelCount() {
+    const el = document.querySelector('.ytus-sel-count strong');
+    if (el) el.textContent = state.selected.size;
+    const runBtn = document.getElementById('ytus-run');
+    if (runBtn) {
+      runBtn.disabled = state.selected.size === 0;
+      runBtn.textContent = `Unsubscribe ${state.selected.size > 0 ? state.selected.size : ''} →`;
+    }
+  }
+
+  function renderLogTab(body, footer) {
+    body.innerHTML = `<div class="ytus-log-wrap" id="ytus-log-inner">
+      ${state.log.length === 0
+        ? '<div style="color:#555;text-align:center;padding:40px 0">No log entries yet.</div>'
+        : state.log.map(e =>
+            `<div class="ytus-log-entry ${e.type}">[${e.ts}] ${escHtml(e.msg)}</div>`
+          ).join('')
+      }
+    </div>`;
+    footer.innerHTML = `<button class="ytus-btn" id="ytus-clearlog">Clear log</button>`;
+    footer.querySelector('#ytus-clearlog').addEventListener('click', () => {
+      state.log = [];
+      renderBody();
+    });
+  }
+
+  function renderLog() {
+    if (currentTab !== 'log') return;
+    const el = document.getElementById('ytus-log-inner');
+    if (!el) return;
+    el.innerHTML = state.log.map(e =>
+      `<div class="ytus-log-entry ${e.type}">[${e.ts}] ${escHtml(e.msg)}</div>`
+    ).join('');
+  }
+
+  function renderSettingsTab(body, footer) {
+    body.innerHTML = `
+      <div class="ytus-settings-section">
+        <div class="ytus-settings-label">Automation</div>
+        <div class="ytus-settings-row">
+          <label>Delay between unsubscribes</label>
+          <input type="range" class="ytus-range" id="ytus-delay" min="800" max="5000" step="100" value="${state.delay}">
+          <span class="ytus-range-val" id="ytus-delay-val">${(state.delay / 1000).toFixed(1)}s</span>
+        </div>
+      </div>
+      <div class="ytus-info-box">
+        <strong style="color:#ccc">How it works</strong><br>
+        1. Navigate to <a href="https://www.youtube.com/feed/channels">youtube.com/feed/channels</a><br>
+        2. Open this panel and click <strong style="color:#ccc">↻ Scan</strong><br>
+        3. Select channels you want to remove<br>
+        4. Click <strong style="color:#ccc">Unsubscribe</strong><br><br>
+        The script visits each channel page and clicks the unsubscribe button automatically.
+        Use a delay ≥ 1.5s to avoid rate-limiting.
+      </div>
+    `;
+    footer.innerHTML = `<span class="ytus-sel-count" style="color:#555">Settings auto-save</span>`;
+
+    body.querySelector('#ytus-delay').addEventListener('input', e => {
+      state.delay = parseInt(e.target.value);
+      body.querySelector('#ytus-delay-val').textContent = (state.delay / 1000).toFixed(1) + 's';
+      GM_setValue('delay', state.delay);
+    });
+  }
+
+  // ─── Actions ──────────────────────────────────────────────────────────────────
+  function scanChannels() {
+    addLog('Scanning page for subscriptions…', 'info');
+    const found = scrapeChannels();
+    // Merge with existing, preserving status
+    const existingMap = Object.fromEntries(state.channels.map(c => [c.id, c]));
+    const merged = found.map(c => existingMap[c.id] ? { ...c, status: existingMap[c.id].status } : c);
+
+    if (merged.length === 0) {
+      addLog('No channels found. Try navigating to youtube.com/feed/channels first.', 'err');
+    } else {
+      addLog(`Found ${merged.length} subscribed channel(s).`, 'ok');
+    }
+    state.channels = merged;
+    renderBody();
+  }
+
+  function invertSelection() {
+    const filtered = state.channels.filter(ch =>
+      ch.name.toLowerCase().includes(state.filterText.toLowerCase())
+    );
+    filtered.forEach(ch => {
+      if (state.selected.has(ch.id)) state.selected.delete(ch.id);
+      else state.selected.add(ch.id);
+    });
+    renderBody();
+  }
+
+  async function runUnsubscribe() {
+    if (state.running) return;
+    const toProcess = state.channels.filter(ch => state.selected.has(ch.id) && ch.status !== 'done');
+    if (toProcess.length === 0) return;
+
+    state.running = true;
+    state.paused = false;
+    state.progress = { done: 0, total: toProcess.length };
+    addLog(`Starting unsubscribe for ${toProcess.length} channels…`, 'info');
+    renderBody();
+
+    for (let i = 0; i < toProcess.length; i++) {
+      if (!state.running) break;
+      while (state.paused) await sleep(400);
+
+      const ch = toProcess[i];
+      addLog(`Unsubscribing: ${ch.name}`, 'info');
+      try {
+        const ok = await unsubscribeOne(ch);
+        ch.status = ok ? 'done' : 'failed';
+        if (ok) {
+          state.selected.delete(ch.id);
+          addLog(`✓ Unsubscribed from ${ch.name}`, 'ok');
+        } else {
+          addLog(`✗ Failed: ${ch.name} — visit the channel manually`, 'err');
+        }
+      } catch (e) {
+        ch.status = 'failed';
+        addLog(`✗ Error on ${ch.name}: ${e.message}`, 'err');
+      }
+
+      state.progress.done = i + 1;
+      renderBody();
+
+      if (i < toProcess.length - 1 && state.running) {
+        const delay = rand(state.delay - 300, state.delay + 300);
+        await sleep(delay);
+      }
+    }
+
+    state.running = false;
+    state.paused = false;
+    addLog('Run complete.', 'ok');
+    renderBody();
+  }
+
+  function togglePause() {
+    state.paused = !state.paused;
+    addLog(state.paused ? 'Paused.' : 'Resumed.', 'info');
+    renderBody();
+  }
+
+  function stopRun() {
+    state.running = false;
+    state.paused = false;
+    addLog('Stopped by user.', 'info');
+    renderBody();
+  }
+
+  function openPanel() {
+    createPanel();
+    document.getElementById('ytus-backdrop').style.display = 'block';
+    document.getElementById(PANEL_ID).style.display = 'flex';
+    currentTab = 'channels';
+    panel.querySelectorAll('.ytus-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'channels'));
+    scanChannels();
+    renderBody();
+  }
+
+  function closePanel() {
+    const p = document.getElementById(PANEL_ID);
+    const bd = document.getElementById('ytus-backdrop');
+    if (p) p.style.display = 'none';
+    if (bd) bd.style.display = 'none';
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ─── FAB button ───────────────────────────────────────────────────────────────
+  function createFAB() {
+    if (document.getElementById('ytus-fab')) return;
+    const fab = document.createElement('button');
+    fab.id = 'ytus-fab';
+    fab.title = 'Open YouTube Unsubscriber';
+    fab.innerHTML = `
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6l-1 14H6L5 6"/>
+        <path d="M10 11v6M14 11v6"/>
+        <path d="M9 6V4h6v2"/>
+      </svg>
+    `;
+    fab.addEventListener('click', openPanel);
+    document.body.appendChild(fab);
+  }
+
+  // ─── Keyboard shortcut: Alt+U ─────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (e.altKey && e.key === 'u') {
+      const p = document.getElementById(PANEL_ID);
+      if (!p || p.style.display === 'none' || p.style.display === '') openPanel();
+      else closePanel();
+    }
+  });
+
+  // ─── Init ─────────────────────────────────────────────────────────────────────
+  window.addEventListener('load', () => {
+    createFAB();
+    addLog('YouTube Unsubscriber loaded. Press Alt+U or click the FAB to open.', 'info');
+  });
+
+  // SPA navigation support
+  let lastUrl = location.href;
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      setTimeout(createFAB, 1500);
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+
+})();
